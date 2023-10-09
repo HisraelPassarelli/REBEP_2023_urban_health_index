@@ -1,0 +1,202 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(readr)
+library(tidyverse)
+library(magrittr)
+```
+
+Este arquivo está vinculado ao artigo intitulado "Mapeando as disparidades socioeconômicas de saúde urbana: um estudo comparativo entre seis capitais brasileiras". Os códigos a seguir descrevem todas as etapas utilizadas para construir o índice de saúde urbana (ISU) utilizado no artigo. 
+
+A base de dados utilizada nesse exemplo se refere aos setores censitários da cidade de Belo Horizonte. As variáveis já foram construídas anteriormente, conforme descrito na seção metodológica do artigo. Esse script se concentrará na construção do ISU para Belo Horizonte, podendo também ser replicado para outras cidades.
+
+
+Leitura da base de dados contendo as variáveis selecionadas, desagregadas por setores censitários de Belo Horizonte: 
+
+```{r}
+exemplo_BH = readxl::read_excel(path = "../Planilhas_ISU/exemplo_BH.xlsx")
+head(exemplo_BH)
+```
+
+## Padronização dos dados
+
+A primeira etapa consiste em padronizar os dados pela média e desvio padrão. Criarei a função robust_scale para realizar a tarefa de padronização
+
+```{r}
+robust_scale = function(x) {
+    (x - (mean(x))) / sd(x)
+}
+
+BH_norm = as.data.frame(lapply(exemplo_BH[4:11], robust_scale))
+```
+
+Depois de padronizados os dados pela média e desvio-padrão, faça a normalização das variáveis na escala de 0 a 1, com o método de normalização min-max. 
+
+```{r}
+#define Min-Max normalization function
+min_max_norm <- function(x) {
+    (x - (min(x))) / (max(x) - min(x))
+}
+
+BH_min_max_norm <- as.data.frame(lapply(BH_norm, min_max_norm))
+```
+
+Aplicando inversão na variável sobre a densidade morador-domicílio para que ela fique coerente com os demais indicadores de saúde urbana. 
+
+```{r}
+data_norm_BH = BH_min_max_norm |>
+        dplyr::mutate(dens_morador_domicilio = 1-person_household,
+                      prop_acima_pobreza = 1-prop_pobreza,
+                      
+                      #colocando novamente a coluna Cod_setor na base de dados
+                      
+                      Cod_setor = exemplo_BH$Cod_setor,
+                      Situacao_setor = exemplo_BH$Situacao_setor,
+                      Tipo_setor = exemplo_BH$Tipo_setor) |>
+        dplyr::select(Cod_setor, Situacao_setor, Tipo_setor, everything()) |>
+        dplyr::select(-person_household, -prop_pobreza)
+head(data_norm_BH)
+```
+
+
+## Criando o Índice de Saúde Urbana 
+
+
+### Estabelecendo os pesos para cada variável
+
+Para analisar a importância de cada variável individualmente e usá-la como peso para cada variável antes de calcular o ISU, você pode utilizar o método de Análise de Componentes Principais (PCA) juntamente com a variância explicada por cada componente.
+
+O código aabaixo utiliza a função prcomp() da biblioteca stats para realizar a Análise de Componentes Principais (PCA) nas variáveis de interesse. Em seguida, a variância explicada por cada componente é obtida a partir das propriedades sdev do objeto resultante do PCA. A importância de cada variável é calculada como a proporção da variância explicada por ela em relação à variância total.
+
+Essa análise fornecerá uma medida da importância relativa de cada variável antes de calcular o ISU. Esses valores de importância podem ser usados como pesos para cada variável durante o cálculo do ISU.
+
+```{r}
+library(stats)
+
+# Definindo as variáveis de interesse
+variables <- data_norm_BH[, c("water_supply", "sewage_system", "waste_destination", "dens_morador_domicilio", "alfabetizados", "prop_acima_pobreza", "mean_household_income", "prop_brancos")]
+
+
+# Realize a Análise de Componentes Principais (PCA)
+pca <- prcomp(variables)
+
+# Obtenha a variância explicada por cada componente
+variance <- pca$sdev^2
+
+# Calcule a importância de cada variável como a proporção da variância explicada por ela
+importance <- variance / sum(variance)
+
+# Exiba a importância de cada variável
+importance
+```
+
+Para normalizar os valores do vetor de importância de forma que a soma dos três primeiros valores corresponda a 39.6% e a soma dos cinco últimos valores corresponda a 60.4%, você pode seguir os seguintes passos:
+
+1. Divida os três primeiros valores do vetor pela soma desses três valores.
+
+2. Multiplique cada um dos três primeiros valores normalizados pelo peso correspondente (39.6%).
+
+3. Divida os cinco últimos valores do vetor pela soma desses cinco valores.
+
+4. Multiplique cada um dos cinco últimos valores normalizados pelo peso correspondente (60.4%).
+
+5. Junte os valores normalizados e ponderados em um novo vetor de pesos normalizados.
+
+
+```{r}
+
+# Divida os três primeiros valores pela soma desses valores
+normalized_first <- importance[1:3] / sum(importance[1:3])
+
+# Multiplique cada valor normalizado pelo peso correspondente (39.6%)
+weighted_first <- normalized_first * 0.396
+
+# Divida os cinco últimos valores pela soma desses valores
+normalized_last <- importance[4:8] / sum(importance[4:8])
+
+# Multiplique cada valor normalizado pelo peso correspondente (60.4%)
+weighted_last <- normalized_last * 0.604
+
+# Junte os valores normalizados e ponderados em um novo vetor de pesos normalizados
+normalized_weights <- c(weighted_first, weighted_last)
+
+# Exiba o vetor de pesos normalizados
+print(normalized_weights)
+
+```
+
+O código acima realiza a normalização dos valores de importância de acordo com os passos mencionados. O resultado final é armazenado no vetor normalized_weights, que contém os valores normalizados e ponderados de acordo com as porcentagens desejadas.
+
+
+Criando as funções para o cálculo do ISU ponderado e não-ponderado:
+
+```{r}
+# Não-ponderado
+calculate_isu <- function(variables) {
+  return(prod(variables)^(1/length(variables)))
+}
+
+#Ponderada
+calculate_isu_weighted <- function(variables, weights) {
+  return(prod(variables^weights)^(1/sum(weights)))
+}
+```
+
+```{r}
+data_norm_BH$ISU <- apply(variables, 1, calculate_isu)
+data_norm_BH$ISU_weighted <- apply(variables, 1, calculate_isu_weighted, weights = normalized_weights)
+```
+
+
+
+## Organizando os dados para exportação da base de dados em csv
+
+
+```{r}
+ISU_BH = exemplo_BH |>
+        dplyr::rename(renda_media_domicilo = mean_household_income,
+                      dens_morador_domicilio = person_household,
+                      abastecimento_agua = water_supply,
+                      esgotamento_sanitario = sewage_system,
+                      coleta_lixo = waste_destination,
+                      prop_acima_linha_pobreza = prop_pobreza) |>
+        
+        dplyr::mutate(nome_municipio = "Belo Horizonte",
+                      abastecimento_agua = abastecimento_agua*100,
+                      esgotamento_sanitario = esgotamento_sanitario*100,
+                      coleta_lixo = coleta_lixo*100,
+                      taxa_alfabetizacao = alfabetizados*100,
+                      prop_acima_linha_pobreza = prop_acima_linha_pobreza*100,
+                      prop_brancos = prop_brancos*100,
+                      ISU = data_norm_BH$ISU,
+                      ISU_weighted = data_norm_BH$ISU_weighted) |>
+        dplyr::select(Cod_setor,
+                      Situacao_setor,
+                      nome_municipio,
+                      abastecimento_agua, 
+                      esgotamento_sanitario, 
+                      coleta_lixo, 
+                      dens_morador_domicilio,
+                      taxa_alfabetizacao,
+                      prop_acima_linha_pobreza,
+                      renda_media_domicilo,
+                      prop_brancos,
+                      ISU,
+                      ISU_weighted)
+head(ISU_BH)
+```
+
+
+## Resultados
+
+ISU médio de Belo Horizonte em 2010: 
+
+```{r}
+ISU_BH |>
+        dplyr::summarise(ISU_nao_ponderado = mean(ISU, na.rm = T),
+                         ISU_ponderado = mean(ISU_weighted, na.rm = T))
+```
+
